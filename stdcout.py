@@ -80,8 +80,8 @@ class PyNumberMethods(ctypes.Structure):
 
 
 
-def main():
-	import sys, io
+def setup():
+	import io
 	
 	def operator_lshift(self: io.TextIOWrapper, other: object) -> io.TextIOWrapper:
 		self.write(str(other))
@@ -96,7 +96,9 @@ def main():
 	textio_wrapper_ptr.contents.tp_as_number = ctypes.cast(ctypes.pointer(textio_as_number), ctypes.c_void_p)
 	
 	ctypes.pythonapi.PyType_Ready(textio_wrapper_ptr)
-	
-	sys.stdout << "Hello, world!" << '\n'
 
-if __name__=="__main__": main()
+if __name__=="__main__":
+	setup()
+	
+	import sys
+	sys.stdout << "Hello, world!" << '\n'
