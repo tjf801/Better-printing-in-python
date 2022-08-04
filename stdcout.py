@@ -81,15 +81,27 @@ class PyNumberMethods(ctypes.Structure):
 
 
 def setup():
+	from typing import TypeVar, Type
 	import io
 	
+	# ostream write operator
+	# ostream& operator<<(ostream&, const T&)
 	def operator_lshift(self: io.TextIOWrapper, other: object) -> io.TextIOWrapper:
 		self.write(str(other))
 		return self
 	
+	# istream read operator
+	# istream& operator>>(istream&, T&)
+	_T = TypeVar("_T")
+	def operator_rshift(self: io.TextIOWrapper, other: Type[_T]) -> _T:
+		return other(self.readline())
+	
 	textio_wrapper_ptr = ctypes.cast(ctypes.c_void_p(id(io.TextIOWrapper)), ctypes.POINTER(PyTypeObject))
 	
-	textio_as_number = PyNumberMethods(nb_lshift=binaryfunc(operator_lshift))
+	textio_as_number = PyNumberMethods(
+		nb_lshift=binaryfunc(operator_lshift),
+		nb_rshift=binaryfunc(operator_rshift),
+	)
 	
 	textio_wrapper_ptr.contents.tp_dict = ctypes.cast(ctypes.c_void_p(), ctypes.py_object)
 	textio_wrapper_ptr.contents.tp_flags = ctypes.c_uint32(0)
@@ -101,4 +113,9 @@ if __name__=="__main__":
 	setup()
 	
 	import sys
+	
+	# TODO: make sys.endl (and make sure it also has performance overhead)
 	sys.stdout << "Hello, world!" << '\n'
+	
+	x = sys.stdin >> int
+	print(x+1)
