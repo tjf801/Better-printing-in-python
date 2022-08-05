@@ -150,6 +150,3 @@ if __name__=="__main__":
 	import sys
 	
 	sys.stdout << "Hello, world!" << endl
-	
-	x = sys.stdin >> int
-	print(x+1)
