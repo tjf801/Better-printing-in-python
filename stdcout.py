@@ -1,121 +1,155 @@
+import typing as _typing
 import ctypes
 
-destructor = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.c_void_p)
-getattrfunc = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.py_object, ctypes.c_char_p)
-setattrfunc = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.py_object, ctypes.c_char_p, ctypes.py_object)
-reprfunc = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.py_object)
-binaryfunc = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.py_object, ctypes.py_object)
-ternaryfunc = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.py_object, ctypes.py_object, ctypes.py_object)
-unaryfunc = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.py_object)
-inquiry = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.py_object)
+from internals import PyTypeObject, PyNumberMethods, binaryfunc
 
-class PyTypeObject(ctypes.Structure):
-	_fields_ = (
-		('ob_refcnt', ctypes.c_ssize_t),
-		('ob_type', ctypes.POINTER(ctypes.c_void_p)), # PyTypeObject*
-		
-		('ob_size', ctypes.c_ssize_t),
-		
-		('tp_name', ctypes.c_char_p),
-		('tp_basicsize', ctypes.c_ssize_t),
-		('tp_itemsize', ctypes.c_ssize_t),
-		
-		('tp_dealloc', destructor), 
-		('tp_vectorcall_offset', ctypes.c_ssize_t),
-		('tp_getattr', getattrfunc),
-		('tp_setattr', setattrfunc),
-		
-		('tp_as_async', ctypes.c_void_p),
-		
-		('tp_repr', reprfunc),
-		
-		('tp_as_number', ctypes.c_void_p), # PyNumberMethods*
-		('tp_as_sequence', ctypes.c_void_p), # PySequenceMethods*
-		('tp_as_mapping', ctypes.c_void_p), # PyMappingMethods*
-		
-		('tp_hash', inquiry),
-		('tp_call', ternaryfunc),
-		('tp_str', unaryfunc),
-		('tp_getattro', getattrfunc),
-		('tp_setattro', setattrfunc),
-		
-		('tp_as_buffer', ctypes.c_void_p), # PyBufferProcs*
-		
-		('tp_flags', ctypes.c_uint),
-		('tp_doc', ctypes.c_char_p),
-		
-		('tp_traverse', ctypes.c_void_p),
-		('tp_clear', ctypes.c_void_p),
-		
-		('tp_richcompare', ctypes.c_void_p),
-		('tp_weaklistoffset', ctypes.c_ssize_t),
-		('tp_iter', ctypes.c_void_p),
-		('tp_iternext', ctypes.c_void_p),
-		('tp_methods', ctypes.c_void_p),
-		('tp_members', ctypes.c_void_p),
-		('tp_getset', ctypes.c_void_p),
-		('tp_base', ctypes.c_void_p),
-		
-		('tp_dict', ctypes.py_object),
-		# TODO: rest of fields
-	)
+import io, inspect, os
 
-class PyNumberMethods(ctypes.Structure):
-	_fields_ = (
-		('nb_add', binaryfunc),
-		('nb_subtract', binaryfunc),
-		('nb_multiply', binaryfunc),
-		('nb_remainder', binaryfunc),
-		('nb_divmod', binaryfunc),
-		('nb_power', ternaryfunc),
-		('nb_negative', unaryfunc),
-		('nb_positive', unaryfunc),
-		('nb_absolute', unaryfunc),
-		('nb_bool', inquiry),
-		('nb_invert', unaryfunc),
-		('nb_lshift', binaryfunc),
-		('nb_rshift', binaryfunc),
-		# TODO: rest of fields
-	)
+@_typing.runtime_checkable
+class SupportsRLShift(_typing.Protocol):
+	__slots__ = ()
+	def __rlshift__(self, other: io.IOBase) -> io.IOBase: ...
 
 
-
-def setup():
-	from typing import TypeVar, Type
-	import io
+# c++ ostream write operator
+def operator_lshift(self: io.IOBase, other: object) -> io.IOBase:
+	# check that self is writable
+	if not self.writable():
+		raise io.UnsupportedOperation('not writable')
 	
-	# ostream write operator
-	# ostream& operator<<(ostream&, const T&)
-	def operator_lshift(self: io.TextIOWrapper, other: object) -> io.TextIOWrapper:
-		self.write(str(other))
-		return self
+	# NOTE: we cannot use the write() method because it gets overrided with different signatures
+	# see https://github.com/python/cpython/blob/main/Modules/_io/iobase.c#:~:text=%22Even%20though%20IOBase,called.%5Cn%22
 	
-	# istream read operator
-	# istream& operator>>(istream&, T&)
-	_T = TypeVar("_T")
-	def operator_rshift(self: io.TextIOWrapper, other: Type[_T]) -> _T:
-		return other(self.readline())
+	# if the other type has a custom support for rlshift, use that instead
+	# otherwise, fall back to the default implementation
+	if isinstance(other, SupportsRLShift):
+		result = other.__rlshift__(self)
+		if result is not NotImplemented:
+			return result
 	
-	textio_wrapper_ptr = ctypes.cast(ctypes.c_void_p(id(io.TextIOWrapper)), ctypes.POINTER(PyTypeObject))
+	# check if other is a stream manipulator function like endl
+	# (must be a callable that takes a single positional argument)
+	# NOTE: this will raise an exception if other does not return an IOBase
+	elif callable(other):
+		sig = inspect.signature(other)
+		if len(sig.parameters) == 1:
+			param = list(inspect.signature(other).parameters.values())[0]
+			if param.kind in ( 
+				inspect.Parameter.POSITIONAL_ONLY,
+				inspect.Parameter.POSITIONAL_OR_KEYWORD,
+				inspect.Parameter.VAR_POSITIONAL,
+			) and param.default == inspect.Parameter.empty:
+				# call the function with the stream as the first argument
+				result = other(self)
+				if not isinstance(result, io.IOBase):
+					raise TypeError('IO manipulator function must return an IOBase object')
+				return result
 	
-	textio_as_number = PyNumberMethods(
+	# if the other type is raw bytes, just write it directly
+	if isinstance(other, bytes):
+		self.writelines((other,))
+	
+	# if the other type supports the buffer protocol, write it directly
+	# TODO
+	
+	# if the other type supports __bytes__, write it directl
+	# TODO: is this desired behavior?
+	elif isinstance(other, _typing.SupportsBytes):
+		self.writelines((other.__bytes__(),))
+	
+	# if self is a TextIO, we can use strings
+	elif isinstance(self, (io.TextIOBase, io.TextIOWrapper)):
+		# if the other type is a string, write it directly
+		if isinstance(other, str):
+			self.write(other)
+		
+		# otherwise convert the other type to a string
+		else: self.write(str(other))
+	
+	# otherwise, the other type is not supported
+	else:
+		return NotImplemented
+	
+	# return self to allow chaining
+	return self
+
+
+# c++ istream read operator
+# TODO: make this one good too
+_T = _typing.TypeVar("_T")
+def operator_rshift(self: io.TextIOWrapper, other: _typing.Type[_T]) -> _T:
+	return other(self.readline())
+
+
+Py_TPFLAGS_HEAPTYPE = (1 << 9)
+Py_TPFLAGS_BASETYPE = (1 << 10)
+Py_TPFLAGS_READY = (1 << 12)
+Py_TPFLAGS_HAVE_GC = (1 << 14)
+
+def overwrite_shift_operators():
+	priv_io = io._io
+	
+	# overwrite io.IOBase with the new operators
+	
+	iobase_type_ptr = ctypes.cast(ctypes.c_void_p(id(priv_io._IOBase)), ctypes.POINTER(PyTypeObject))
+	
+	iobase_number_methods = PyNumberMethods(
 		nb_lshift=binaryfunc(operator_lshift),
 		nb_rshift=binaryfunc(operator_rshift),
 	)
+	iobase_type_ptr.contents.tp_dict = ctypes.cast(ctypes.c_void_p(), ctypes.py_object)
+	iobase_type_ptr.contents.tp_flags = ctypes.c_uint32(
+		Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC
+	)
+	iobase_type_ptr.contents.tp_as_number = ctypes.cast(ctypes.pointer(iobase_number_methods), ctypes.c_void_p)
 	
-	textio_wrapper_ptr.contents.tp_dict = ctypes.cast(ctypes.c_void_p(), ctypes.py_object)
-	textio_wrapper_ptr.contents.tp_flags = ctypes.c_uint32(0)
-	textio_wrapper_ptr.contents.tp_as_number = ctypes.cast(ctypes.pointer(textio_as_number), ctypes.c_void_p)
+	# reinitialize the IOBase type object
+	ctypes.pythonapi.PyType_Ready(iobase_type_ptr)
 	
-	ctypes.pythonapi.PyType_Ready(textio_wrapper_ptr)
+	# pretty much reinitialize the entire io module
+	for ty in (
+		priv_io._BufferedIOBase,
+		priv_io._RawIOBase,
+		priv_io._TextIOBase,
+		
+		priv_io.BytesIO,
+		priv_io.BufferedReader,
+		priv_io.BufferedWriter,
+		priv_io.BufferedRWPair,
+		priv_io.BufferedRandom,
+		
+		priv_io.FileIO,
+		# priv_io._BytesIOBuffer
+		
+		priv_io._WindowsConsoleIO,
+		
+		priv_io.StringIO,
+		priv_io.TextIOWrapper):
+		type_ptr = ctypes.cast(ctypes.c_void_p(id(ty)), ctypes.POINTER(PyTypeObject))
+		
+		type_ptr.contents.tp_dict = ctypes.cast(ctypes.c_void_p(), ctypes.py_object)
+		type_ptr.contents.tp_bases = ctypes.cast(ctypes.c_void_p(), ctypes.py_object)
+		type_ptr.contents.tp_flags = ctypes.c_uint32(type_ptr.contents.tp_flags & ~Py_TPFLAGS_READY)
+		
+		ctypes.pythonapi.PyType_Ready(type_ptr)
+
+# run the function on import
+overwrite_shift_operators()
+
+
+# TODO: add this to sys module
+_IO = _typing.TypeVar('_IO', bound=io.IOBase)	
+def endl(stream: _IO) -> _IO:
+	# TODO: does c++ actually use the correct line separator or just '\n'?
+	stream.write(os.linesep)
+	stream.flush()
+	return stream
+
 
 if __name__=="__main__":
-	setup()
-	
 	import sys
 	
-	# TODO: make sys.endl (and make sure it also has performance overhead)
-	sys.stdout << "Hello, world!" << '\n'
+	sys.stdout << "Hello, world!" << endl
 	
 	x = sys.stdin >> int
 	print(x+1)
