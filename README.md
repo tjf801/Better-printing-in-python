@@ -9,4 +9,4 @@
  A. absolutely!
 
 ### Q. How do I use this?
- A. just import the file, and then `template<typename T>ostream& operator<<(ostream& self, const T& other)` to your hearts delight!
+ A. just import the file, and then `template<typename T> ostream& operator<<(ostream& self, const T& other)` to your heart's delight!
